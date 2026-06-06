@@ -5,9 +5,10 @@
         <el-card>
           <template #header>
             <div class="card-header">
-              <span>调度方案生成</span>
+              <span>调度方案生成 (线性规划 + 遗传算法)</span>
               <div class="header-actions">
-                <el-button type="primary" @click="generateScheme">
+                <el-switch v-model="useGenetic" active-text="遗传算法" inactive-text="线性规划" />
+                <el-button type="primary" @click="generateScheme" :loading="generating">
                   <el-icon><MagicStick /></el-icon>
                   生成24小时调度方案
                 </el-button>
@@ -20,10 +21,10 @@
           </template>
 
           <el-row :gutter="20" v-if="currentScheme">
-            <el-col :span="6">
+            <el-col :span="5">
               <el-statistic title="方案名称" :value="currentScheme.name" />
             </el-col>
-            <el-col :span="6">
+            <el-col :span="4">
               <el-statistic title="总发电成本(元)" :value="currentResult?.totalCost || 0" />
             </el-col>
             <el-col :span="4">
@@ -46,6 +47,15 @@
             </el-col>
             <el-col :span="4">
               <el-descriptions :column="1" border size="small">
+                <el-descriptions-item label="算法">
+                  <el-tag type="info">
+                    {{ useGenetic ? '遗传算法' : '线性规划' }}
+                  </el-tag>
+                </el-descriptions-item>
+              </el-descriptions>
+            </el-col>
+            <el-col :span="3">
+              <el-descriptions :column="1" border size="small">
                 <el-descriptions-item label="状态">
                   <el-tag :type="getStatusType(currentScheme.status)">
                     {{ getStatusText(currentScheme.status) }}
@@ -62,6 +72,25 @@
           <div v-if="currentResult" class="chart-wrapper">
             <div ref="dispatchChartRef" class="chart-container"></div>
           </div>
+
+          <el-alert 
+            v-if="currentResult && !currentResult.constraints.rampCheck"
+            title="爬坡约束警告"
+            type="warning"
+            :closable="false"
+            class="alert-box"
+          >
+            部分机组出力变化超过爬坡速率限制，建议调整方案
+          </el-alert>
+          <el-alert 
+            v-if="currentResult && !currentResult.constraints.n1Check"
+            title="N-1安全校验失败"
+            type="error"
+            :closable="false"
+            class="alert-box"
+          >
+            网络不满足N-1安全准则，单线路故障可能导致过载
+          </el-alert>
         </el-card>
       </el-col>
     </el-row>
@@ -80,17 +109,23 @@
               <template #default="{ row }">{{ row.hour }}:00</template>
             </el-table-column>
             <el-table-column prop="plantName" label="电厂" min-width="140" />
-            <el-table-column prop="targetOutput" label="目标出力(MW)" width="120" align="right" sortable />
-            <el-table-column prop="rampUp" label="上爬坡(MW)" width="110" align="right">
+            <el-table-column prop="targetOutput" label="目标出力(MW)" width="130" align="right" sortable />
+            <el-table-column prop="rampUp" label="上爬坡(MW)" width="120" align="right">
               <template #default="{ row }">
                 <span v-if="row.rampUp > 0" style="color: #67c23a">+{{ row.rampUp }}</span>
                 <span v-else>-</span>
               </template>
             </el-table-column>
-            <el-table-column prop="rampDown" label="下爬坡(MW)" width="110" align="right">
+            <el-table-column prop="rampDown" label="下爬坡(MW)" width="120" align="right">
               <template #default="{ row }">
                 <span v-if="row.rampDown > 0" style="color: #f56c6c">-{{ row.rampDown }}</span>
                 <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="约束检查" width="100" align="center">
+              <template #default="{ row }">
+                <el-icon v-if="row.rampUp <= 150 && row.rampDown <= 150" color="#67c23a"><Check /></el-icon>
+                <el-icon v-else color="#e6a23c"><Warning /></el-icon>
               </template>
             </el-table-column>
           </el-table>
@@ -100,7 +135,7 @@
         <el-card>
           <template #header>
             <div class="card-header">
-              <span>方案审批</span>
+              <span>方案审批 & 指令推送</span>
             </div>
           </template>
           
@@ -117,6 +152,7 @@
                   type="primary" 
                   @click="submitForApproval"
                   :disabled="!currentScheme || currentScheme.status !== 'draft'"
+                  :loading="submitting"
                 >
                   提交审批
                 </el-button>
@@ -143,10 +179,10 @@
           <el-divider />
 
           <div class="instruction-section">
-            <h4>指令推送</h4>
+            <h4>调度指令推送</h4>
             <el-form label-width="100px">
               <el-form-item label="目标厂站">
-                <el-select v-model="targetStation" placeholder="请选择目标厂站" style="width: 100%">
+                <el-select v-model="targetStation" placeholder="请选择目标厂站" style="width: 100%" filterable>
                   <el-option-group label="发电厂">
                     <el-option
                       v-for="plant in plants"
@@ -178,6 +214,7 @@
                   type="warning" 
                   @click="sendInstruction"
                   :disabled="!currentScheme || currentScheme.status !== 'approved' || !targetStation"
+                  :loading="sending"
                 >
                   <el-icon><Promotion /></el-icon>
                   推送指令
@@ -195,22 +232,28 @@
           <template #header>
             <div class="card-header">
               <span>历史调度方案</span>
+              <el-button size="small" @click="loadSchemes">刷新</el-button>
             </div>
           </template>
-          <el-table :data="schemeHistory" size="small" border>
+          <el-table :data="schemeHistory" size="small" border v-loading="loadingSchemes">
             <el-table-column prop="name" label="方案名称" min-width="180" />
             <el-table-column prop="startTime" label="开始时间" width="160" />
             <el-table-column prop="endTime" label="结束时间" width="160" />
-            <el-table-column prop="status" label="状态" width="120">
+            <el-table-column prop="status" label="状态" width="100">
               <template #default="{ row }">
                 <el-tag :type="getStatusType(row.status)" size="small">
                   {{ getStatusText(row.status) }}
                 </el-tag>
               </template>
             </el-table-column>
+            <el-table-column label="算法" width="100">
+              <template #default="{ row }">
+                <el-tag size="small">{{ row.useGenetic ? '遗传' : 'LP' }}</el-tag>
+              </template>
+            </el-table-column>
             <el-table-column prop="createdBy" label="创建人" width="100" />
-            <el-table-column prop="approvedBy" label="审批人" width="100" />
-            <el-table-column prop="n1CheckPassed" label="N-1校验" width="100">
+            <el-table-column prop="totalCost" label="总成本(元)" width="120" sortable />
+            <el-table-column label="N-1" width="80">
               <template #default="{ row }">
                 <el-icon :color="row.n1CheckPassed ? '#67c23a' : '#f56c6c'">
                   <component :is="row.n1CheckPassed ? 'Check' : 'Close'" />
@@ -227,10 +270,10 @@
       </el-col>
     </el-row>
 
-    <el-dialog v-model="instructionDialogVisible" title="调度指令确认" width="600px">
+    <el-dialog v-model="instructionDialogVisible" title="调度指令确认" width="700px">
       <el-table :data="instructions" size="small" border>
         <el-table-column prop="content" label="指令内容" min-width="200" />
-        <el-table-column prop="targetStation" label="目标厂站" width="150">
+        <el-table-column label="目标厂站" width="150">
           <template #default="{ row }">
             {{ getStationName(row.targetStation) }}
           </template>
@@ -243,7 +286,7 @@
           </template>
         </el-table-column>
         <el-table-column prop="sentAt" label="发送时间" width="160" />
-        <el-table-column label="操作" width="180">
+        <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button 
               v-if="row.status === 'sent'"
@@ -263,6 +306,9 @@
             >
               申请调整
             </el-button>
+            <el-tag v-if="row.status === 'adjust_requested'" type="warning" size="small">
+              待总调审批
+            </el-tag>
           </template>
         </el-table-column>
       </el-table>
@@ -274,32 +320,75 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
-import { useDB } from '@/database'
-import { generateDispatchScheme, type DispatchResult } from '@/utils/dispatch'
-import type { DispatchScheme, DispatchInstruction } from '@/types'
+import { dispatchAPI, plantAPI, substationAPI } from '@/api'
+import type { DispatchScheme, DispatchInstruction, DispatchPlanItem } from '@/types'
 import dayjs from 'dayjs'
 
-const db = useDB()
 const dispatchChartRef = ref<HTMLElement>()
 let dispatchChart: echarts.ECharts | null = null
 
-const currentResult = ref<DispatchResult | null>(null)
+const currentResult = ref<{
+  plans: DispatchPlanItem[]
+  constraints: { n1Check: boolean; rampCheck: boolean; balanceCheck: boolean }
+  totalCost: number
+  lineFlows: { lineId: string; flow: number; maxCapacity: number }[]
+} | null>(null)
+
 const currentScheme = ref<DispatchScheme | null>(null)
 const schemeName = ref('')
 const createdBy = ref('调度员')
+const useGenetic = ref(false)
 const targetStation = ref('')
 const instructionContent = ref('')
 const instructionDialogVisible = ref(false)
 
-const plants = computed(() => db.getPlants())
-const substations = computed(() => db.getSubstations())
-const schemeHistory = computed(() => db.getDispatchSchemes())
-const instructions = computed(() => db.getDispatchInstructions())
+const generating = ref(false)
+const submitting = ref(false)
+const sending = ref(false)
+const loadingSchemes = ref(false)
+
+const plants = ref<any[]>([])
+const substations = ref<any[]>([])
+const schemeHistory = ref<any[]>([])
+const instructions = ref<any[]>([])
 
 const planTableData = computed(() => {
   if (!currentResult.value) return []
-  return currentResult.value.plans.slice(0, 48)
+  return currentResult.value.plans.slice(0, 72)
 })
+
+async function loadPlants() {
+  try {
+    const data: any = await plantAPI.list()
+    plants.value = data as any[]
+  } catch (e) {}
+}
+
+async function loadSubstations() {
+  try {
+    const data: any = await substationAPI.list()
+    substations.value = data as any[]
+  } catch (e) {}
+}
+
+async function loadSchemes() {
+  loadingSchemes.value = true
+  try {
+    const data: any = await dispatchAPI.listSchemes()
+    schemeHistory.value = data as any[]
+  } catch (e) {
+    ElMessage.error('加载历史方案失败')
+  } finally {
+    loadingSchemes.value = false
+  }
+}
+
+async function loadInstructions() {
+  try {
+    const data: any = await dispatchAPI.listInstructions()
+    instructions.value = data as any[]
+  } catch (e) {}
+}
 
 function getStatusType(status: string): 'success' | 'info' | 'warning' | 'danger' | 'primary' {
   const map: Record<string, any> = {
@@ -352,29 +441,48 @@ function getStationName(id: string): string {
   return sub?.name || id
 }
 
-function generateScheme() {
-  currentResult.value = generateDispatchScheme(24)
-  
-  schemeName.value = `调度方案_${dayjs().format('YYYYMMDD_HHmm')}`
-  
-  currentScheme.value = {
-    id: '',
-    name: schemeName.value,
-    startTime: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-    endTime: dayjs().add(24, 'hour').format('YYYY-MM-DD HH:mm:ss'),
-    status: 'draft',
-    createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-    createdBy: createdBy.value,
-    n1CheckPassed: currentResult.value.constraints.n1Check,
-    rampCheckPassed: currentResult.value.constraints.rampCheck,
-    plans: currentResult.value.plans
-  }
+async function generateScheme() {
+  generating.value = true
+  try {
+    const result: any = await dispatchAPI.generate({
+      hours: 24,
+      useGenetic: useGenetic.value
+    })
+    
+    currentResult.value = result
+    
+    schemeName.value = `调度方案_${dayjs().format('YYYYMMDD_HHmm')}_${useGenetic.value ? 'GA' : 'LP'}`
+    
+    currentScheme.value = {
+      id: '',
+      name: schemeName.value,
+      startTime: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      endTime: dayjs().add(24, 'hour').format('YYYY-MM-DD HH:mm:ss'),
+      status: 'draft',
+      createdAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      createdBy: createdBy.value,
+      n1CheckPassed: result.constraints.n1Check,
+      rampCheckPassed: result.constraints.rampCheck,
+      plans: result.plans
+    }
 
-  nextTick(() => {
-    initDispatchChart()
-  })
-  
-  ElMessage.success('调度方案生成成功')
+    nextTick(() => {
+      initDispatchChart()
+    })
+    
+    ElMessage.success(`调度方案生成成功 (${useGenetic.value ? '遗传算法' : '线性规划'})`)
+    
+    if (!result.constraints.rampCheck) {
+      ElMessage.warning('注意：部分机组不满足爬坡约束')
+    }
+    if (!result.constraints.n1Check) {
+      ElMessage.error('警告：网络不满足N-1安全准则')
+    }
+  } catch (e) {
+    ElMessage.error('生成调度方案失败')
+  } finally {
+    generating.value = false
+  }
 }
 
 function resetScheme() {
@@ -415,17 +523,28 @@ function initDispatchChart() {
   }))
 
   dispatchChart.setOption({
+    title: {
+      text: `${useGenetic.value ? '遗传算法' : '线性规划'}优化 - 24小时机组出力计划`,
+      left: 'center',
+      textStyle: { fontSize: 14 }
+    },
     tooltip: {
       trigger: 'axis',
-      axisPointer: { type: 'cross' }
+      axisPointer: { type: 'cross' },
+      formatter: (params: any) => {
+        let total = 0
+        params.forEach((p: any) => { total += p.value })
+        return `${params[0].axisValue}<br/>总出力: ${total.toFixed(0)} MW`
+      }
     },
     legend: {
-      data: Array.from(plantMap.keys())
+      data: Array.from(plantMap.keys()),
+      bottom: 0
     },
     grid: {
       left: '3%',
       right: '4%',
-      bottom: '3%',
+      bottom: '15%',
       containLabel: true
     },
     xAxis: {
@@ -435,87 +554,127 @@ function initDispatchChart() {
     },
     yAxis: {
       type: 'value',
-      name: 'MW'
+      name: 'MW',
+      min: 0
     },
     series
   })
 }
 
-function submitForApproval() {
+async function submitForApproval() {
   if (!currentScheme.value || !schemeName.value) {
     ElMessage.warning('请填写方案名称')
     return
   }
   
-  currentScheme.value.name = schemeName.value
-  currentScheme.value.status = 'pending_approval'
-  
-  const saved = db.addDispatchScheme(currentScheme.value)
-  currentScheme.value = saved
-  
-  ElMessage.success('已提交审批')
+  submitting.value = true
+  try {
+    const saved: any = await dispatchAPI.createScheme({
+      name: schemeName.value,
+      startTime: currentScheme.value.startTime,
+      endTime: currentScheme.value.endTime,
+      status: 'pending_approval',
+      createdBy: createdBy.value,
+      plans: currentResult.value?.plans || [],
+      n1CheckPassed: currentScheme.value.n1CheckPassed,
+      rampCheckPassed: currentScheme.value.rampCheckPassed,
+      totalCost: currentResult.value?.totalCost || 0,
+      useGenetic: useGenetic.value
+    })
+    
+    currentScheme.value = { ...currentScheme.value, ...saved, status: 'pending_approval' }
+    await loadSchemes()
+    ElMessage.success('已提交总调度长审批')
+  } catch (e) {
+    ElMessage.error('提交失败')
+  } finally {
+    submitting.value = false
+  }
 }
 
-function approveScheme() {
-  if (!currentScheme.value) return
+async function approveScheme() {
+  if (!currentScheme.value || !currentScheme.value.id) return
   
-  currentScheme.value = db.updateDispatchScheme(currentScheme.value.id, {
-    status: 'approved',
-    approvedBy: '总调度长',
-    approvedAt: dayjs().format('YYYY-MM-DD HH:mm:ss')
-  })
-  
-  ElMessage.success('方案已审批通过，可以推送指令')
+  try {
+    await dispatchAPI.updateScheme(currentScheme.value.id, {
+      status: 'approved',
+      approvedBy: '总调度长'
+    })
+    
+    currentScheme.value.status = 'approved'
+    currentScheme.value.approvedBy = '总调度长'
+    await loadSchemes()
+    ElMessage.success('方案已审批通过，可以推送指令')
+  } catch (e) {
+    ElMessage.error('审批失败')
+  }
 }
 
-function rejectScheme() {
-  if (!currentScheme.value) return
+async function rejectScheme() {
+  if (!currentScheme.value || !currentScheme.value.id) return
   
-  currentScheme.value = db.updateDispatchScheme(currentScheme.value.id, {
-    status: 'rejected',
-    approvedBy: '总调度长',
-    approvedAt: dayjs().format('YYYY-MM-DD HH:mm:ss')
-  })
-  
-  ElMessage.info('方案已驳回')
+  try {
+    await dispatchAPI.updateScheme(currentScheme.value.id, {
+      status: 'rejected',
+      approvedBy: '总调度长'
+    })
+    
+    currentScheme.value.status = 'rejected'
+    await loadSchemes()
+    ElMessage.info('方案已驳回')
+  } catch (e) {
+    ElMessage.error('操作失败')
+  }
 }
 
-function sendInstruction() {
+async function sendInstruction() {
   if (!targetStation.value || !instructionContent.value) {
     ElMessage.warning('请选择目标厂站并填写指令内容')
     return
   }
 
-  db.addDispatchInstruction({
-    schemeId: currentScheme.value?.id || '',
-    targetStation: targetStation.value,
-    content: instructionContent.value,
-    status: 'sent'
-  })
-  
-  ElMessage.success('调度指令已推送至厂站终端')
-  instructionContent.value = ''
-  instructionDialogVisible.value = true
+  sending.value = true
+  try {
+    await dispatchAPI.createInstruction({
+      schemeId: currentScheme.value?.id || '',
+      targetStation: targetStation.value,
+      content: instructionContent.value
+    })
+    
+    await loadInstructions()
+    ElMessage.success('调度指令已推送至厂站终端')
+    instructionContent.value = ''
+    instructionDialogVisible.value = true
+  } catch (e) {
+    ElMessage.error('推送失败')
+  } finally {
+    sending.value = false
+  }
 }
 
-function confirmInstruction(row: DispatchInstruction) {
-  db.updateDispatchInstruction(row.id, {
-    status: 'confirmed',
-    confirmedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-    operatorName: '李值班'
-  })
-  ElMessage.success('值班员已确认指令')
+async function confirmInstruction(row: DispatchInstruction) {
+  try {
+    await dispatchAPI.updateInstruction(row.id, {
+      status: 'confirmed',
+      operatorName: '李值班'
+    })
+    await loadInstructions()
+    ElMessage.success('值班员已确认指令')
+  } catch (e) {}
 }
 
-function requestAdjust(row: DispatchInstruction) {
-  db.updateDispatchInstruction(row.id, {
-    status: 'adjust_requested',
-    adjustReason: '负荷变化较大，建议调整出力'
-  })
-  ElMessage.info('已提交调整申请，等待总调审批')
+async function requestAdjust(row: DispatchInstruction) {
+  try {
+    await dispatchAPI.updateInstruction(row.id, {
+      status: 'adjust_requested',
+      adjustReason: '负荷变化较大，建议调整出力'
+    })
+    await loadInstructions()
+    ElMessage.info('已提交调整申请，等待总调审批')
+  } catch (e) {}
 }
 
-function viewScheme(scheme: DispatchScheme) {
+function viewScheme(scheme: any) {
   currentScheme.value = scheme
   if (scheme.plans) {
     currentResult.value = {
@@ -525,7 +684,7 @@ function viewScheme(scheme: DispatchScheme) {
         rampCheck: scheme.rampCheckPassed,
         balanceCheck: true
       },
-      totalCost: 0,
+      totalCost: scheme.totalCost || 0,
       lineFlows: []
     }
     nextTick(() => {
@@ -534,7 +693,12 @@ function viewScheme(scheme: DispatchScheme) {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await loadPlants()
+  await loadSubstations()
+  await loadSchemes()
+  await loadInstructions()
+  
   nextTick(() => {
     if (dispatchChartRef.value) {
       dispatchChart = echarts.init(dispatchChartRef.value)
@@ -558,7 +722,8 @@ onMounted(() => {
 
 .header-actions {
   display: flex;
-  gap: 10px;
+  gap: 15px;
+  align-items: center;
 }
 
 .row-mt {
@@ -571,11 +736,15 @@ onMounted(() => {
 
 .chart-container {
   width: 100%;
-  height: 300px;
+  height: 320px;
 }
 
 .instruction-section h4 {
   margin-bottom: 15px;
   color: #303133;
+}
+
+.alert-box {
+  margin-top: 15px;
 }
 </style>

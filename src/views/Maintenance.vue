@@ -6,13 +6,13 @@
           <template #header>
             <div class="card-header">
               <span>维保工单</span>
-              <el-button type="primary" @click="generateWorkOrders">
+              <el-button type="primary" @click="generateWorkOrders" :loading="generating">
                 <el-icon><MagicStick /></el-icon>
                 自动生成工单
               </el-button>
             </div>
           </template>
-          <el-table :data="workOrders" size="small" border>
+          <el-table :data="workOrders" size="small" border v-loading="loading">
             <el-table-column prop="equipmentName" label="设备名称" min-width="140" />
             <el-table-column label="设备类型" width="100">
               <template #default="{ row }">
@@ -46,7 +46,11 @@
                 {{ row.assignedTeam ? getTeamName(row.assignedTeam) : '未分配' }}
               </template>
             </el-table-column>
-            <el-table-column prop="createdAt" label="创建时间" width="160" />
+            <el-table-column prop="createdAt" label="创建时间" width="160">
+              <template #default="{ row }">
+                {{ formatTime(row.createdAt) }}
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="180" fixed="right">
               <template #default="{ row }">
                 <el-button type="primary" link size="small" @click="assignTeam(row)">分配班组</el-button>
@@ -61,7 +65,7 @@
           <template #header>
             <span>备件库存</span>
           </template>
-          <el-table :data="spareParts" size="small" border max-height="400">
+          <el-table :data="spareParts" size="small" border max-height="400" v-loading="loading">
             <el-table-column prop="name" label="备件名称" min-width="120" />
             <el-table-column prop="model" label="型号" width="100" />
             <el-table-column label="库存" width="120">
@@ -83,14 +87,14 @@
           <template #header>
             <span>维修班组</span>
           </template>
-          <el-table :data="teams" size="small" border>
+          <el-table :data="teams" size="small" border v-loading="loading">
             <el-table-column prop="name" label="班组名称" width="120" />
             <el-table-column label="人数" width="80">
-              <template #default="{ row }">{{ row.members.length }}</template>
+              <template #default="{ row }">{{ row.members?.length || 0 }}</template>
             </el-table-column>
             <el-table-column label="技能" min-width="120">
               <template #default="{ row }">
-                <el-tag v-for="skill in row.skills.slice(0, 2)" :key="skill" size="small" style="margin-right: 4px;">
+                <el-tag v-for="skill in (row.skills || []).slice(0, 2)" :key="skill" size="small" style="margin-right: 4px;">
                   {{ skill }}
                 </el-tag>
               </template>
@@ -106,14 +110,18 @@
           <template #header>
             <span>检修计划</span>
           </template>
-          <el-table :data="maintenancePlans" size="small" border>
-            <el-table-column prop="equipmentType" label="设备类型" width="100">
+          <el-table :data="maintenancePlans" size="small" border v-loading="loading">
+            <el-table-column label="设备类型" width="100">
               <template #default="{ row }">
                 {{ getEquipmentTypeText(row.equipmentType) }}
               </template>
             </el-table-column>
-            <el-table-column prop="startTime" label="开始时间" width="160" />
-            <el-table-column prop="endTime" label="结束时间" width="160" />
+            <el-table-column prop="startTime" label="开始时间" width="160">
+              <template #default="{ row }">{{ formatTime(row.startTime) }}</template>
+            </el-table-column>
+            <el-table-column prop="endTime" label="结束时间" width="160">
+              <template #default="{ row }">{{ formatTime(row.endTime) }}</template>
+            </el-table-column>
             <el-table-column prop="description" label="检修内容" min-width="200" />
             <el-table-column label="状态" width="100">
               <template #default="{ row }">
@@ -134,7 +142,7 @@
             <el-option
               v-for="team in teams"
               :key="team.id"
-              :label="`${team.name} (${team.members.length}人)`"
+              :label="`${team.name} (${team.members?.length || 0}人)`"
               :value="team.id"
             />
           </el-select>
@@ -153,29 +161,62 @@
       </el-form>
       <template #footer>
         <el-button @click="assignDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="confirmAssign">确认分配</el-button>
+        <el-button type="primary" @click="confirmAssign" :loading="submitting">确认分配</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useDB } from '@/database'
-import type { WorkOrder } from '@/types'
+import { workOrderAPI, sparePartAPI, staffAPI, maintenancePlanAPI, plantAPI, lineAPI } from '@/api'
+import type { WorkOrder, PowerPlant, TransmissionLine } from '@/types'
 import dayjs from 'dayjs'
 
-const db = useDB()
+const loading = ref(false)
+const generating = ref(false)
+const submitting = ref(false)
 const assignDialogVisible = ref(false)
 const selectedTeam = ref('')
 const deductParts = ref<string[]>([])
 const selectedOrder = ref<WorkOrder | null>(null)
 
-const workOrders = computed(() => db.getWorkOrders())
-const spareParts = computed(() => db.getSpareParts())
-const teams = computed(() => db.getTeams())
-const maintenancePlans = computed(() => db.getMaintenancePlans())
+const workOrders = ref<WorkOrder[]>([])
+const spareParts = ref<any[]>([])
+const teams = ref<any[]>([])
+const maintenancePlans = ref<any[]>([])
+const plants = ref<PowerPlant[]>([])
+const lines = ref<TransmissionLine[]>([])
+
+async function loadData() {
+  loading.value = true
+  try {
+    const [woRes, partsRes, teamsRes, plansRes, plantsRes, linesRes] = await Promise.all([
+      workOrderAPI.list(),
+      sparePartAPI.list(),
+      staffAPI.listTeams(),
+      maintenancePlanAPI.list(),
+      plantAPI.list(),
+      lineAPI.list()
+    ])
+    workOrders.value = woRes as WorkOrder[]
+    spareParts.value = partsRes as any[]
+    teams.value = teamsRes as any[]
+    maintenancePlans.value = plansRes as any[]
+    plants.value = plantsRes as PowerPlant[]
+    lines.value = linesRes as TransmissionLine[]
+  } catch (e) {
+    console.error('加载数据失败', e)
+  } finally {
+    loading.value = false
+  }
+}
+
+function formatTime(timestamp: string): string {
+  if (!timestamp) return '--'
+  return dayjs(timestamp).format('YYYY-MM-DD HH:mm')
+}
 
 function getEquipmentTypeText(type: string): string {
   const map: Record<string, string> = {
@@ -271,101 +312,137 @@ function getTeamName(id: string): string {
   return team?.name || id
 }
 
-function generateWorkOrders() {
-  const plants = db.getPlants()
-  plants.forEach(plant => {
-    if (plant.runHours > 8000) {
-      const exist = workOrders.value.some(w => 
-        w.equipmentId === plant.id && w.status !== 'completed'
-      )
-      if (!exist) {
-        db.addWorkOrder({
-          equipmentId: plant.id,
-          equipmentType: 'plant',
-          equipmentName: plant.name,
-          type: 'preventive',
-          priority: plant.runHours > 10000 ? 'high' : 'medium',
-          description: `运行时长${plant.runHours}小时，需进行季度预防性检修`,
-          status: 'pending',
-          sparePartsNeeded: [
-            { partId: spareParts.value[0]?.id || '', partName: spareParts.value[0]?.name || '变压器绝缘油', quantity: 2, unit: '桶' }
-          ],
-          estimatedHours: 48
-        })
-      }
-    }
-  })
+async function generateWorkOrders() {
+  generating.value = true
+  try {
+    const newOrders: WorkOrder[] = []
 
-  const lines = db.getLines()
-  lines.forEach(line => {
-    if (line.status === 'warning' || line.currentFlow / line.maxCapacity > 0.85) {
-      const exist = workOrders.value.some(w => 
-        w.equipmentId === line.id && w.status !== 'completed'
-      )
-      if (!exist) {
-        db.addWorkOrder({
-          equipmentId: line.id,
-          equipmentType: 'line',
-          equipmentName: line.name,
-          type: 'corrective',
-          priority: 'high',
-          description: '线路负载过高，需检查连接点和绝缘子',
-          status: 'pending',
-          sparePartsNeeded: [
-            { partId: spareParts.value[2]?.id || '', partName: spareParts.value[2]?.name || '隔离开关', quantity: 1, unit: '组' }
-          ],
-          estimatedHours: 8
-        })
+    plants.value.forEach(plant => {
+      if (plant.runHours > 8000) {
+        const exist = workOrders.value.some(w => 
+          w.equipmentId === plant.id && w.status !== 'completed'
+        )
+        if (!exist) {
+          newOrders.push({
+            id: '',
+            equipmentId: plant.id,
+            equipmentType: 'plant',
+            equipmentName: plant.name,
+            type: 'preventive',
+            priority: plant.runHours > 10000 ? 'high' : 'medium',
+            description: `运行时长${plant.runHours}小时，需进行季度预防性检修`,
+            status: 'pending',
+            sparePartsNeeded: [
+              { partId: spareParts.value[0]?.id || '', partName: spareParts.value[0]?.name || '变压器绝缘油', quantity: 2, unit: '桶' }
+            ],
+            estimatedHours: 48,
+            createdAt: ''
+          })
+        }
       }
-    }
-  })
+    })
 
-  ElMessage.success('已根据设备状态自动生成维保工单')
+    lines.value.forEach(line => {
+      if (line.status === 'warning' || (line.maxCapacity > 0 && line.currentFlow / line.maxCapacity > 0.85)) {
+        const exist = workOrders.value.some(w => 
+          w.equipmentId === line.id && w.status !== 'completed'
+        )
+        if (!exist) {
+          newOrders.push({
+            id: '',
+            equipmentId: line.id,
+            equipmentType: 'line',
+            equipmentName: line.name,
+            type: 'corrective',
+            priority: 'high',
+            description: '线路负载过高，需检查连接点和绝缘子',
+            status: 'pending',
+            sparePartsNeeded: [
+              { partId: spareParts.value[2]?.id || '', partName: spareParts.value[2]?.name || '隔离开关', quantity: 1, unit: '组' }
+            ],
+            estimatedHours: 8,
+            createdAt: ''
+          })
+        }
+      }
+    })
+
+    for (const order of newOrders) {
+      await workOrderAPI.create(order)
+    }
+
+    await loadData()
+    ElMessage.success(`已根据设备状态自动生成${newOrders.length}条维保工单`)
+  } catch (e) {
+    console.error('生成工单失败', e)
+    ElMessage.error('生成工单失败')
+  } finally {
+    generating.value = false
+  }
 }
 
 function assignTeam(row: WorkOrder) {
   selectedOrder.value = row
   selectedTeam.value = row.assignedTeam || ''
-  deductParts.value = row.sparePartsNeeded.map(p => p.partId)
+  deductParts.value = row.sparePartsNeeded?.map(p => p.partId) || []
   assignDialogVisible.value = true
 }
 
-function confirmAssign() {
+async function confirmAssign() {
   if (!selectedOrder.value || !selectedTeam.value) {
     ElMessage.warning('请选择班组')
     return
   }
 
-  const team = teams.value.find(t => t.id === selectedTeam.value)
-  
-  db.updateWorkOrder(selectedOrder.value.id, {
-    status: 'assigned',
-    assignedTeam: selectedTeam.value,
-    assignedMembers: team?.members || []
-  })
+  submitting.value = true
+  try {
+    const team = teams.value.find(t => t.id === selectedTeam.value)
+    
+    await workOrderAPI.update(selectedOrder.value.id, {
+      status: 'assigned',
+      assignedTeam: selectedTeam.value,
+      assignedMembers: team?.members || []
+    })
 
-  deductParts.value.forEach(partId => {
-    const part = spareParts.value.find(p => p.id === partId)
-    const orderPart = selectedOrder.value?.sparePartsNeeded.find(p => p.partId === partId)
-    if (part && orderPart) {
-      db.updateSparePart(partId, {
-        quantity: Math.max(0, part.quantity - orderPart.quantity)
-      })
+    for (const partId of deductParts.value) {
+      const part = spareParts.value.find(p => p.id === partId)
+      const orderPart = selectedOrder.value?.sparePartsNeeded?.find(p => p.partId === partId)
+      if (part && orderPart) {
+        await sparePartAPI.update(partId, {
+          quantity: Math.max(0, part.quantity - orderPart.quantity)
+        })
+      }
     }
-  })
 
-  assignDialogVisible.value = false
-  ElMessage.success('班组分配成功，备件已扣减')
+    await loadData()
+    assignDialogVisible.value = false
+    ElMessage.success('班组分配成功，备件已扣减')
+  } catch (e) {
+    console.error('分配失败', e)
+    ElMessage.error('分配失败')
+  } finally {
+    submitting.value = false
+  }
 }
 
-function completeOrder(row: WorkOrder) {
-  db.updateWorkOrder(row.id, {
-    status: 'completed',
-    completedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
-    actualHours: row.estimatedHours
-  })
-  ElMessage.success('工单已完成')
+async function completeOrder(row: WorkOrder) {
+  try {
+    await workOrderAPI.update(row.id, {
+      status: 'completed',
+      completedAt: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      actualHours: row.estimatedHours
+    })
+    await loadData()
+    ElMessage.success('工单已完成')
+  } catch (e) {
+    console.error('完成工单失败', e)
+    ElMessage.error('操作失败')
+  }
 }
+
+onMounted(() => {
+  loadData()
+})
 </script>
 
 <style scoped>

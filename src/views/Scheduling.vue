@@ -16,14 +16,14 @@
                   size="small"
                   @change="handleWeekChange"
                 />
-                <el-button type="primary" size="small" @click="autoGenerateSchedule">
+                <el-button type="primary" size="small" @click="autoGenerateSchedule" :loading="generating">
                   <el-icon><MagicStick /></el-icon>
                   自动排班
                 </el-button>
               </div>
             </div>
           </template>
-          <el-table :data="scheduleTableData" size="small" border>
+          <el-table :data="scheduleTableData" size="small" border v-loading="loading">
             <el-table-column prop="date" label="日期" width="120" fixed />
             <el-table-column prop="weekday" label="星期" width="80" fixed />
             <el-table-column label="早班 (08:00-16:00)" min-width="150">
@@ -85,13 +85,13 @@
           <template #header>
             <span>人员信息</span>
           </template>
-          <el-table :data="staffList" size="small" border max-height="350">
+          <el-table :data="staffList" size="small" border max-height="350" v-loading="loading">
             <el-table-column prop="name" label="姓名" width="80" />
             <el-table-column prop="position" label="职位" width="100" />
             <el-table-column label="技能" min-width="120">
               <template #default="{ row }">
                 <el-tag 
-                  v-for="skill in row.skills.slice(0, 2)" 
+                  v-for="skill in (row.skills || []).slice(0, 2)" 
                   :key="skill" 
                   size="small" 
                   style="margin-right: 4px; margin-bottom: 4px;"
@@ -121,7 +121,7 @@
           <template #header>
             <span>调班申请</span>
           </template>
-          <el-table :data="swapRequests" size="small" border max-height="250">
+          <el-table :data="swapRequests" size="small" border max-height="250" v-loading="loading">
             <el-table-column prop="fromStaffName" label="申请人" width="80" />
             <el-table-column prop="toStaffName" label="调班人" width="80" />
             <el-table-column prop="date" label="日期" width="100" />
@@ -190,29 +190,31 @@
       </el-form>
       <template #footer>
         <el-button @click="swapDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitSwap">提交申请</el-button>
+        <el-button type="primary" @click="submitSwap" :loading="submitting">提交申请</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useDB } from '@/database'
+import { staffAPI, scheduleAPI } from '@/api'
 import type { Schedule, SwapRequest } from '@/types'
 import dayjs from 'dayjs'
 
-const db = useDB()
+const loading = ref(false)
+const generating = ref(false)
+const submitting = ref(false)
 const weekDate = ref(dayjs().format('YYYY-MM-DD'))
 const swapDialogVisible = ref(false)
 const swapFrom = ref<Schedule | null>(null)
 const swapToStaff = ref('')
 const swapReason = ref('')
 
-const staffList = computed(() => db.getStaff())
-const schedules = computed(() => db.getSchedules())
-const swapRequests = computed(() => db.getSwapRequests())
+const staffList = ref<any[]>([])
+const schedules = ref<Schedule[]>([])
+const swapRequests = ref<SwapRequest[]>([])
 
 const availableStaff = computed(() => 
   staffList.value.filter(s => s.status === 'on_duty' && s.id !== swapFrom.value?.staffId)
@@ -240,6 +242,24 @@ const scheduleTableData = computed(() => {
   
   return days
 })
+
+async function loadData() {
+  loading.value = true
+  try {
+    const [staffRes, schedulesRes, swapRes] = await Promise.all([
+      staffAPI.list(),
+      scheduleAPI.list(),
+      scheduleAPI.listSwapRequests()
+    ])
+    staffList.value = staffRes as any[]
+    schedules.value = schedulesRes as Schedule[]
+    swapRequests.value = swapRes as SwapRequest[]
+  } catch (e) {
+    console.error('加载数据失败', e)
+  } finally {
+    loading.value = false
+  }
+}
 
 function getStaffStatusText(status: string): string {
   const map: Record<string, string> = {
@@ -281,40 +301,50 @@ function getSwapStatusText(status: string): string {
 function handleWeekChange() {
 }
 
-function autoGenerateSchedule() {
-  const weekStart = dayjs(weekDate.value).startOf('week')
-  const onDutyStaff = staffList.value.filter(s => s.status === 'on_duty')
-  
-  if (onDutyStaff.length < 3) {
-    ElMessage.warning('在岗人员不足，无法自动排班')
-    return
-  }
-
-  for (let i = 0; i < 7; i++) {
-    const date = weekStart.add(i, 'day').format('YYYY-MM-DD')
-    const shifts = ['morning', 'afternoon', 'night'] as const
+async function autoGenerateSchedule() {
+  generating.value = true
+  try {
+    const weekStart = dayjs(weekDate.value).startOf('week')
+    const onDutyStaff = staffList.value.filter(s => s.status === 'on_duty')
     
-    shifts.forEach((shift, shiftIdx) => {
-      const existing = schedules.value.find(s => s.date === date && s.shift === shift)
-      if (existing) {
-        db.updateSchedule(existing.id, { isSwapped: false })
-      } else {
-        const staffIdx = (i * 3 + shiftIdx) % onDutyStaff.length
-        const staff = onDutyStaff[staffIdx]
-        
-        db.addSchedule({
-          date,
-          shift,
-          staffId: staff.id,
-          staffName: staff.name,
-          position: staff.position,
-          isSwapped: false
-        })
-      }
-    })
-  }
+    if (onDutyStaff.length < 3) {
+      ElMessage.warning('在岗人员不足，无法自动排班')
+      return
+    }
 
-  ElMessage.success('已根据人员技能和工时上限自动生成排班表')
+    for (let i = 0; i < 7; i++) {
+      const date = weekStart.add(i, 'day').format('YYYY-MM-DD')
+      const shifts = ['morning', 'afternoon', 'night'] as const
+      
+      for (let shiftIdx = 0; shiftIdx < shifts.length; shiftIdx++) {
+        const shift = shifts[shiftIdx]
+        const existing = schedules.value.find(s => s.date === date && s.shift === shift)
+        if (existing) {
+          await scheduleAPI.update(existing.id, { isSwapped: false })
+        } else {
+          const staffIdx = (i * 3 + shiftIdx) % onDutyStaff.length
+          const staff = onDutyStaff[staffIdx]
+          
+          await scheduleAPI.create({
+            date,
+            shift,
+            staffId: staff.id,
+            staffName: staff.name,
+            position: staff.position,
+            isSwapped: false
+          })
+        }
+      }
+    }
+
+    await loadData()
+    ElMessage.success('已根据人员技能和工时上限自动生成排班表')
+  } catch (e) {
+    console.error('自动排班失败', e)
+    ElMessage.error('自动排班失败')
+  } finally {
+    generating.value = false
+  }
 }
 
 function requestSwap(item: Schedule) {
@@ -324,60 +354,82 @@ function requestSwap(item: Schedule) {
   swapDialogVisible.value = true
 }
 
-function submitSwap() {
+async function submitSwap() {
   if (!swapFrom.value || !swapToStaff.value) {
     ElMessage.warning('请选择调班人员')
     return
   }
 
-  const toStaff = staffList.value.find(s => s.id === swapToStaff.value)
-  
-  db.addSwapRequest({
-    fromStaffId: swapFrom.value.staffId,
-    fromStaffName: swapFrom.value.staffName,
-    toStaffId: swapToStaff.value,
-    toStaffName: toStaff?.name || '',
-    date: swapFrom.value.date,
-    shift: swapFrom.value.shift,
-    reason: swapReason.value,
-    status: 'pending'
-  })
-
-  swapDialogVisible.value = false
-  ElMessage.success('调班申请已提交，等待审批')
-}
-
-function approveSwap(request: SwapRequest) {
-  db.updateSwapRequest(request.id, {
-    status: 'approved',
-    approvedBy: '总调度长'
-  })
-
-  const schedule = schedules.value.find(s => 
-    s.date === request.date && s.shift === request.shift && s.staffId === request.fromStaffId
-  )
-  
-  if (schedule) {
-    db.updateSchedule(schedule.id, {
-      staffId: request.toStaffId,
-      staffName: request.toStaffName,
-      isSwapped: true,
-      originalStaffId: request.fromStaffId
+  submitting.value = true
+  try {
+    const toStaff = staffList.value.find(s => s.id === swapToStaff.value)
+    
+    await scheduleAPI.createSwapRequest({
+      fromStaffId: swapFrom.value.staffId,
+      fromStaffName: swapFrom.value.staffName,
+      toStaffId: swapToStaff.value,
+      toStaffName: toStaff?.name || '',
+      date: swapFrom.value.date,
+      shift: swapFrom.value.shift,
+      reason: swapReason.value,
+      status: 'pending'
     })
+
+    await loadData()
+    swapDialogVisible.value = false
+    ElMessage.success('调班申请已提交，等待审批')
+  } catch (e) {
+    console.error('提交调班失败', e)
+    ElMessage.error('提交失败')
+  } finally {
+    submitting.value = false
   }
-
-  ElMessage.success('调班已批准')
 }
 
-function rejectSwap(request: SwapRequest) {
-  db.updateSwapRequest(request.id, {
-    status: 'rejected',
-    approvedBy: '总调度长'
-  })
-  ElMessage.info('调班已驳回')
+async function approveSwap(request: SwapRequest) {
+  try {
+    await scheduleAPI.updateSwapRequest(request.id, {
+      status: 'approved',
+      approvedBy: '总调度长'
+    })
+
+    const schedule = schedules.value.find(s => 
+      s.date === request.date && s.shift === request.shift && s.staffId === request.fromStaffId
+    )
+    
+    if (schedule) {
+      await scheduleAPI.update(schedule.id, {
+        staffId: request.toStaffId,
+        staffName: request.toStaffName,
+        isSwapped: true,
+        originalStaffId: request.fromStaffId
+      })
+    }
+
+    await loadData()
+    ElMessage.success('调班已批准')
+  } catch (e) {
+    console.error('批准调班失败', e)
+    ElMessage.error('操作失败')
+  }
 }
 
-onMounted(() => {
+async function rejectSwap(request: SwapRequest) {
+  try {
+    await scheduleAPI.updateSwapRequest(request.id, {
+      status: 'rejected',
+      approvedBy: '总调度长'
+    })
+    await loadData()
+    ElMessage.info('调班已驳回')
+  } catch (e) {
+    console.error('驳回调班失败', e)
+    ElMessage.error('操作失败')
+  }
+}
+
+onMounted(async () => {
+  await loadData()
   if (schedules.value.length === 0) {
     autoGenerateSchedule()
   }

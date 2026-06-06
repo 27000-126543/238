@@ -2,7 +2,7 @@
   <div class="dashboard">
     <el-row :gutter="20" class="stats-row">
       <el-col :span="6">
-        <el-card class="stat-card">
+        <el-card class="stat-card" v-loading="loading">
           <div class="stat-content">
             <div class="stat-icon total-generation">
               <el-icon :size="32"><Lightning /></el-icon>
@@ -15,7 +15,7 @@
         </el-card>
       </el-col>
       <el-col :span="6">
-        <el-card class="stat-card">
+        <el-card class="stat-card" v-loading="loading">
           <div class="stat-content">
             <div class="stat-icon total-load">
               <el-icon :size="32"><House /></el-icon>
@@ -28,7 +28,7 @@
         </el-card>
       </el-col>
       <el-col :span="6">
-        <el-card class="stat-card">
+        <el-card class="stat-card" v-loading="loading">
           <div class="stat-content">
             <div class="stat-icon frequency">
               <el-icon :size="32"><Odometer /></el-icon>
@@ -43,7 +43,7 @@
         </el-card>
       </el-col>
       <el-col :span="6">
-        <el-card class="stat-card">
+        <el-card class="stat-card" v-loading="loading">
           <div class="stat-content">
             <div class="stat-icon equipment">
               <el-icon :size="32"><Checked /></el-icon>
@@ -87,7 +87,7 @@
               <el-button type="primary" link size="small">查看全部</el-button>
             </div>
           </template>
-          <el-table :data="recentAlarms" size="small" max-height="300">
+          <el-table :data="recentAlarms" size="small" max-height="300" v-loading="loading">
             <el-table-column prop="level" label="级别" width="80">
               <template #default="{ row }">
                 <el-tag :type="getAlarmType(row.level)" size="small">
@@ -101,7 +101,11 @@
               </template>
             </el-table-column>
             <el-table-column prop="message" label="描述" />
-            <el-table-column prop="timestamp" label="时间" width="160" />
+            <el-table-column prop="timestamp" label="时间" width="160">
+              <template #default="{ row }">
+                {{ formatTime(row.timestamp) }}
+              </template>
+            </el-table-column>
           </el-table>
         </el-card>
       </el-col>
@@ -133,7 +137,7 @@
             </el-col>
           </el-row>
           <el-divider />
-          <el-table :data="plantList" size="small" max-height="200">
+          <el-table :data="plantList" size="small" max-height="200" v-loading="loading">
             <el-table-column prop="name" label="电厂名称" />
             <el-table-column prop="type" label="类型" width="80">
               <template #default="{ row }">{{ getPlantTypeText(row.type) }}</template>
@@ -156,24 +160,28 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import * as echarts from 'echarts'
-import { useDB } from '@/database'
 import { useMonitorStore } from '@/stores/monitor'
+import { plantAPI, alarmAPI, loadForecastAPI } from '@/api'
 import type { PowerPlant, Alarm } from '@/types'
+import dayjs from 'dayjs'
 
-const db = useDB()
 const monitorStore = useMonitorStore()
 
 const loadChartRef = ref<HTMLElement>()
 const pieChartRef = ref<HTMLElement>()
 let loadChart: echarts.ECharts | null = null
 let pieChart: echarts.ECharts | null = null
+const loading = ref(false)
+const plants = ref<PowerPlant[]>([])
+const alarms = ref<Alarm[]>([])
+const forecastData = ref<any[]>([])
 
 const currentData = computed(() => monitorStore.currentData)
-const recentAlarms = computed(() => monitorStore.alarms.slice(0, 5))
+const recentAlarms = computed(() => alarms.value.slice(0, 5))
 
 const totalGeneration = computed(() => {
-  const plants = db.getPlants().filter(p => p.status === 'running')
-  return plants.reduce((sum, p) => sum + p.currentOutput, 0)
+  const runningPlants = plants.value.filter(p => p.status === 'running')
+  return runningPlants.reduce((sum, p) => sum + (p.currentOutput || 0), 0)
 })
 
 const totalLoad = computed(() => {
@@ -185,29 +193,50 @@ const frequencyNormal = computed(() => {
   return freq ? freq >= 49.5 && freq <= 50.5 : true
 })
 
-const plantList = computed(() => db.getPlants().slice(0, 5))
+const plantList = computed(() => plants.value.slice(0, 5))
 
 const plantStats = computed(() => {
-  const plants = db.getPlants()
   return {
-    running: plants.filter(p => p.status === 'running').length,
-    stopped: plants.filter(p => p.status === 'stopped').length,
-    maintenance: plants.filter(p => p.status === 'maintenance').length,
-    fault: plants.filter(p => p.status === 'fault').length
+    running: plants.value.filter(p => p.status === 'running').length,
+    stopped: plants.value.filter(p => p.status === 'stopped').length,
+    maintenance: plants.value.filter(p => p.status === 'maintenance').length,
+    fault: plants.value.filter(p => p.status === 'fault').length
   }
 })
 
 const availableRate = computed(() => {
-  const total = plantStats.value.running + plantStats.value.stopped + plantStats.value.maintenance + plantStats.value.fault
+  const total = plants.value.length
   if (total === 0) return 0
   return Math.round(plantStats.value.running / total * 100)
 })
+
+async function loadData() {
+  loading.value = true
+  try {
+    const [plantsRes, alarmsRes, forecastRes] = await Promise.all([
+      plantAPI.list(),
+      alarmAPI.list(),
+      loadForecastAPI.list(24)
+    ])
+    plants.value = plantsRes as PowerPlant[]
+    alarms.value = alarmsRes as Alarm[]
+    forecastData.value = forecastRes as any[]
+  } catch (e) {
+    console.error('加载数据失败', e)
+  } finally {
+    loading.value = false
+  }
+}
 
 function formatPower(value: number): string {
   if (value >= 1000) {
     return (value / 1000).toFixed(2) + 'K'
   }
   return value.toString()
+}
+
+function formatTime(timestamp: string): string {
+  return dayjs(timestamp).format('YYYY-MM-DD HH:mm')
 }
 
 function getPlantTypeText(type: PowerPlant['type']): string {
@@ -277,11 +306,8 @@ function initLoadChart() {
   if (!loadChartRef.value) return
   loadChart = echarts.init(loadChartRef.value)
   
-  const hours = Array.from({ length: 24 }, (_, i) => `${i}:00`)
-  const baseLoad = 8000
-  const forecastLoad = hours.map((_, i) => 
-    Math.round(baseLoad * (0.6 + 0.4 * Math.sin((i - 6) * Math.PI / 12)))
-  )
+  const hours = forecastData.value.map(f => dayjs(f.timestamp).format('H:00'))
+  const forecastLoad = forecastData.value.map(f => f.forecastLoad)
   const actualLoad = forecastLoad.map(v => Math.round(v * (0.95 + Math.random() * 0.1)))
 
   loadChart.setOption({
@@ -336,13 +362,12 @@ function initPieChart() {
   if (!pieChartRef.value) return
   pieChart = echarts.init(pieChartRef.value)
   
-  const plants = db.getPlants()
   const typeData = [
-    { value: plants.filter(p => p.type === 'thermal').reduce((s, p) => s + p.capacity, 0), name: '火电' },
-    { value: plants.filter(p => p.type === 'hydro').reduce((s, p) => s + p.capacity, 0), name: '水电' },
-    { value: plants.filter(p => p.type === 'nuclear').reduce((s, p) => s + p.capacity, 0), name: '核电' },
-    { value: plants.filter(p => p.type === 'wind').reduce((s, p) => s + p.capacity, 0), name: '风电' },
-    { value: plants.filter(p => p.type === 'solar').reduce((s, p) => s + p.capacity, 0), name: '光伏' }
+    { value: plants.value.filter(p => p.type === 'thermal').reduce((s, p) => s + p.capacity, 0), name: '火电' },
+    { value: plants.value.filter(p => p.type === 'hydro').reduce((s, p) => s + p.capacity, 0), name: '水电' },
+    { value: plants.value.filter(p => p.type === 'nuclear').reduce((s, p) => s + p.capacity, 0), name: '核电' },
+    { value: plants.value.filter(p => p.type === 'wind').reduce((s, p) => s + p.capacity, 0), name: '风电' },
+    { value: plants.value.filter(p => p.type === 'solar').reduce((s, p) => s + p.capacity, 0), name: '光伏' }
   ].filter(d => d.value > 0)
 
   pieChart.setOption({
@@ -378,7 +403,8 @@ function handleResize() {
   pieChart?.resize()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await loadData()
   setTimeout(() => {
     initLoadChart()
     initPieChart()

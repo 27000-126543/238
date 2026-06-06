@@ -8,7 +8,7 @@
             <el-tab-pane label="变电站" name="substations" />
             <el-tab-pane label="输电线路" name="lines" />
           </el-tabs>
-          <el-button type="primary" @click="handleAdd">
+          <el-button type="primary" @click="handleAdd" :loading="loading">
             <el-icon><Plus /></el-icon>
             新增设备
           </el-button>
@@ -29,6 +29,7 @@
           <el-table-column prop="ratedVoltage" label="额定电压(kV)" width="120" />
           <el-table-column prop="currentOutput" label="当前出力(MW)" width="130" sortable />
           <el-table-column prop="rampRate" label="爬坡速率(MW/h)" width="130" />
+          <el-table-column prop="costPerMwh" label="发电成本(元/MWh)" width="140" />
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
               <el-tag :type="getStatusType(row.status)" size="small">
@@ -123,6 +124,9 @@
           </el-form-item>
           <el-form-item label="额定电压(kV)" prop="ratedVoltage">
             <el-input-number v-model="formData.ratedVoltage" :min="0" style="width: 100%" />
+          </el-form-item>
+          <el-form-item label="发电成本(元/MWh)" prop="costPerMwh">
+            <el-input-number v-model="formData.costPerMwh" :min="0" :step="0.01" style="width: 100%" />
           </el-form-item>
           <el-form-item label="最大出力(MW)" prop="maxOutput">
             <el-input-number v-model="formData.maxOutput" :min="0" style="width: 100%" />
@@ -233,29 +237,29 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="handleSubmit">确定</el-button>
+        <el-button type="primary" @click="handleSubmit" :loading="submitting">确定</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { useDB } from '@/database'
+import { plantAPI, substationAPI, lineAPI } from '@/api'
 import type { PowerPlant, Substation, TransmissionLine } from '@/types'
 
-const db = useDB()
 const activeTab = ref('plants')
 const loading = ref(false)
+const submitting = ref(false)
 const dialogVisible = ref(false)
 const isEdit = ref(false)
 const editId = ref('')
 const formRef = ref<FormInstance>()
 
-const plants = computed(() => db.getPlants())
-const substations = computed(() => db.getSubstations())
-const lines = computed(() => db.getLines())
+const plants = ref<any[]>([])
+const substations = ref<any[]>([])
+const lines = ref<any[]>([])
 
 const tableData = computed(() => {
   switch (activeTab.value) {
@@ -283,6 +287,7 @@ const formData = reactive<any>({
   startCount: 0,
   location: '',
   region: '东区',
+  costPerMwh: 0.3,
   voltageLevel: 0,
   transformerCount: 2,
   busVoltage: 0,
@@ -296,6 +301,24 @@ const formData = reactive<any>({
 
 const formRules: FormRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }]
+}
+
+async function loadData() {
+  loading.value = true
+  try {
+    const [p, s, l] = await Promise.all([
+      plantAPI.list(),
+      substationAPI.list(),
+      lineAPI.list()
+    ])
+    plants.value = p as any[]
+    substations.value = s as any[]
+    lines.value = l as any[]
+  } catch (e) {
+    ElMessage.error('加载数据失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 function getPlantTypeText(type: string): string {
@@ -373,26 +396,28 @@ function handleEdit(row: any) {
   dialogVisible.value = true
 }
 
-function handleDelete(row: any) {
+async function handleDelete(row: any) {
   ElMessageBox.confirm('确定要删除该设备吗？', '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
-  }).then(() => {
-    let success = false
-    switch (activeTab.value) {
-      case 'plants':
-        success = db.deletePlant(row.id)
-        break
-      case 'substations':
-        success = db.deleteSubstation(row.id)
-        break
-      case 'lines':
-        success = db.deleteLine(row.id)
-        break
-    }
-    if (success) {
+  }).then(async () => {
+    try {
+      switch (activeTab.value) {
+        case 'plants':
+          await plantAPI.delete(row.id)
+          break
+        case 'substations':
+          await substationAPI.delete(row.id)
+          break
+        case 'lines':
+          await lineAPI.delete(row.id)
+          break
+      }
       ElMessage.success('删除成功')
+      await loadData()
+    } catch (e) {
+      ElMessage.error('删除失败')
     }
   }).catch(() => {})
 }
@@ -413,6 +438,7 @@ function resetForm() {
     startCount: 0,
     location: '',
     region: '东区',
+    costPerMwh: 0.3,
     voltageLevel: 0,
     transformerCount: 2,
     busVoltage: 0,
@@ -426,41 +452,53 @@ function resetForm() {
   formRef.value?.resetFields()
 }
 
-function handleSubmit() {
-  formRef.value?.validate((valid) => {
-    if (valid) {
-      if (isEdit.value) {
-        switch (activeTab.value) {
-          case 'plants':
-            db.updatePlant(editId.value, formData as Partial<PowerPlant>)
-            break
-          case 'substations':
-            db.updateSubstation(editId.value, formData as Partial<Substation>)
-            break
-          case 'lines':
-            db.updateLine(editId.value, formData as Partial<TransmissionLine>)
-            break
-        }
-        ElMessage.success('更新成功')
-      } else {
-        switch (activeTab.value) {
-          case 'plants':
-            db.addPlant(formData)
-            break
-          case 'substations':
-            db.addSubstation(formData)
-            break
-          case 'lines':
-            formData.maxCapacity = formData.ratedCapacity
-            db.addLine(formData)
-            break
-        }
-        ElMessage.success('新增成功')
+async function handleSubmit() {
+  const valid = await formRef.value?.validate().catch(() => false)
+  if (!valid) return
+
+  submitting.value = true
+  try {
+    if (isEdit.value) {
+      switch (activeTab.value) {
+        case 'plants':
+          await plantAPI.update(editId.value, formData)
+          break
+        case 'substations':
+          await substationAPI.update(editId.value, formData)
+          break
+        case 'lines':
+          formData.maxCapacity = formData.ratedCapacity
+          await lineAPI.update(editId.value, formData)
+          break
       }
-      dialogVisible.value = false
+      ElMessage.success('更新成功')
+    } else {
+      switch (activeTab.value) {
+        case 'plants':
+          await plantAPI.create(formData)
+          break
+        case 'substations':
+          await substationAPI.create(formData)
+          break
+        case 'lines':
+          formData.maxCapacity = formData.ratedCapacity
+          await lineAPI.create(formData)
+          break
+      }
+      ElMessage.success('新增成功')
     }
-  })
+    dialogVisible.value = false
+    await loadData()
+  } catch (e) {
+    ElMessage.error('操作失败')
+  } finally {
+    submitting.value = false
+  }
 }
+
+onMounted(() => {
+  loadData()
+})
 </script>
 
 <style scoped>

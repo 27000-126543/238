@@ -1,14 +1,18 @@
 {
   "name": "power-grid-system",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "大型电网调度与设备运维桌面系统",
   "main": "electron/main.js",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "client": "vite",
+    "server": "node server/index.js",
+    "server:dev": "nodemon server/index.js",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vue-tsc && vite build && electron-builder"
+    "electron:dev": "concurrently \"npm run server\" \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "vue-tsc && vite build && electron-builder",
+    "install:all": "npm install"
   },
   "dependencies": {
     "vue": "^3.4.0",
@@ -20,8 +24,15 @@
     "dayjs": "^1.11.10",
     "jspdf": "^2.5.1",
     "jspdf-autotable": "^3.8.1",
+    "uuid": "^9.0.1",
+    "axios": "^1.6.5",
+    "d3": "^7.8.5",
+    "@types/d3": "^7.4.3",
+    "javascript-lp-solver": "^0.4.24",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
     "sql.js": "^1.10.3",
-    "uuid": "^9.0.1"
+    "morgan": "^1.10.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
@@ -31,6 +42,8 @@
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1",
     "concurrently": "^8.2.2",
-    "wait-on": "^7.2.0"
+    "wait-on": "^7.2.0",
+    "nodemon": "^3.0.3",
+    "@types/node": "^20.11.5"
   }
 }

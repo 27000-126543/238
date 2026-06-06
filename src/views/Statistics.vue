@@ -24,7 +24,7 @@
                   value-format="YYYY-MM-DD"
                   size="small"
                 />
-                <el-button type="primary" size="small" @click="queryStatistics">
+                <el-button type="primary" size="small" @click="queryStatistics" :loading="loading">
                   <el-icon><Search /></el-icon>
                   查询
                 </el-button>
@@ -128,7 +128,7 @@
               <span>详细统计数据</span>
             </div>
           </template>
-          <el-table :data="detailTableData" size="small" border>
+          <el-table :data="detailTableData" size="small" border v-loading="loading">
             <el-table-column prop="region" label="区域" width="100" />
             <el-table-column prop="totalGeneration" label="发电量(MWh)" width="140" sortable />
             <el-table-column prop="totalConsumption" label="供电量(MWh)" width="140" sortable />
@@ -153,14 +153,13 @@
 import { ref, reactive, onMounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
-import { useDB } from '@/database'
-import type { StatisticsData } from '@/types'
+import { statisticsAPI, plantAPI } from '@/api'
+import type { StatisticsData, PowerPlant } from '@/types'
 import dayjs from 'dayjs'
 import jsPDF from 'jspdf'
 import autoTable from 'jspdf-autotable'
 
-const db = useDB()
-
+const loading = ref(false)
 const selectedRegion = ref('全网')
 const dateRange = ref<string[]>([
   dayjs().subtract(1, 'month').format('YYYY-MM-DD'),
@@ -193,6 +192,7 @@ let equipmentChart: echarts.ECharts | null = null
 
 const regions = ['东区', '西区', '南区', '北区']
 const detailTableData = ref<any[]>([])
+const plants = ref<PowerPlant[]>([])
 
 function formatPower(value: number): string {
   if (value >= 1000000) {
@@ -204,23 +204,38 @@ function formatPower(value: number): string {
   return value.toString()
 }
 
-function queryStatistics() {
-  const startTime = dateRange.value[0] || dayjs().subtract(1, 'month').format('YYYY-MM-DD')
-  const endTime = dateRange.value[1] || dayjs().format('YYYY-MM-DD')
-  
-  const stats = db.getStatistics(selectedRegion.value, startTime, endTime)
-  Object.assign(statsData, stats)
-  
-  detailTableData.value = regions.map(region => {
-    const s = db.getStatistics(region, startTime, endTime)
-    return s
-  })
-
-  nextTick(() => {
-    initCharts()
-  })
-  
-  ElMessage.success('统计数据已更新')
+async function queryStatistics() {
+  loading.value = true
+  try {
+    const startTime = dateRange.value[0] || dayjs().subtract(1, 'month').format('YYYY-MM-DD')
+    const endTime = dateRange.value[1] || dayjs().format('YYYY-MM-DD')
+    
+    const [statsRes, plantsRes] = await Promise.all([
+      statisticsAPI.get({ region: selectedRegion.value, startTime, endTime }),
+      plantAPI.list()
+    ])
+    
+    Object.assign(statsData, statsRes)
+    plants.value = plantsRes as PowerPlant[]
+    
+    const regionResults = await Promise.all(
+      regions.map(region => 
+        statisticsAPI.get({ region, startTime, endTime })
+      )
+    )
+    detailTableData.value = regionResults
+    
+    nextTick(() => {
+      initCharts()
+    })
+    
+    ElMessage.success('统计数据已更新')
+  } catch (e) {
+    console.error('查询统计数据失败', e)
+    ElMessage.error('查询失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 function initCharts() {
@@ -264,9 +279,9 @@ function initRegionChart() {
     regionChart = echarts.init(regionChartRef.value)
   }
 
-  const regionData = regions.map(r => ({
-    name: r,
-    value: db.getStatistics(r, dateRange.value[0] || '', dateRange.value[1] || '').totalGeneration
+  const regionData = detailTableData.value.map(r => ({
+    name: r.region,
+    value: r.totalGeneration
   }))
 
   regionChart.setOption({
@@ -338,13 +353,12 @@ function initEquipmentChart() {
     equipmentChart = echarts.init(equipmentChartRef.value)
   }
 
-  const plants = db.getPlants()
   const typeData = [
-    { value: plants.filter(p => p.type === 'thermal').length, name: '火电' },
-    { value: plants.filter(p => p.type === 'hydro').length, name: '水电' },
-    { value: plants.filter(p => p.type === 'nuclear').length, name: '核电' },
-    { value: plants.filter(p => p.type === 'wind').length, name: '风电' },
-    { value: plants.filter(p => p.type === 'solar').length, name: '光伏' }
+    { value: plants.value.filter(p => p.type === 'thermal').length, name: '火电' },
+    { value: plants.value.filter(p => p.type === 'hydro').length, name: '水电' },
+    { value: plants.value.filter(p => p.type === 'nuclear').length, name: '核电' },
+    { value: plants.value.filter(p => p.type === 'wind').length, name: '风电' },
+    { value: plants.value.filter(p => p.type === 'solar').length, name: '光伏' }
   ].filter(d => d.value > 0)
 
   equipmentChart.setOption({
